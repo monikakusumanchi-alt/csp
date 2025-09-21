@@ -1,0 +1,8 @@
+streamlit
+agents
+openai-agents==0.2.11
+python-dotenv
+qdrant-client
+agno
+asyncio
+pypdf
