@@ -6,3 +6,4 @@ qdrant-client
 agno
 asyncio
 pypdf
+yagmail

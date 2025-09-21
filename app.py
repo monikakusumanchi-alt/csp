@@ -18,6 +18,60 @@ import datetime
 # Setup components
 load_dotenv()
 api_key = os.getenv("OPENAI_API_KEY")
+from agno.tools import tool
+import re
+import yagmail
+def send_support_email(subject: str, body: str) -> str:
+    """Send escalation emails to support team when customer issue requires human intervention."""
+    try:
+        sender_email = "kusumonika033@gmail.com"
+        sender_password = "nobd atmo sjcs vwyr"  # ⚠️ App Password (not personal password)
+
+        # Validate email format
+        email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+        if not re.match(email_pattern, sender_email):
+            return "Invalid email format."
+
+        yag = yagmail.SMTP(user=sender_email, password=sender_password)
+        yag.send(to=sender_email, subject=subject, contents=body)
+        return "Email sent successfully!"
+
+    except Exception as e:
+        return f"Error sending email: {e}"
+
+import json
+import asyncio
+
+async def send_support_email_async(tool_context, args):
+    # If args is a JSON string, parse it
+    if isinstance(args, str):
+        args = json.loads(args)
+    return await asyncio.to_thread(
+        send_support_email,
+        subject=args["subject"],
+        body=args["body"]
+    )
+
+# Escalation email tool for customer support
+send_support_email_tool = FunctionTool(
+    name="SendSupportEmail",
+    description=(
+        "Sends an escalation email to the human support team when a customer issue requires manual intervention. "
+        "Use this tool when the issue is complex, unusual, or outside the scope of the knowledge base. "
+        "The email should summarize the customer’s problem, list any troubleshooting already attempted, "
+        "and provide recommendations or next steps for the support team."
+    ),
+    params_json_schema={
+        "type": "object",
+        "properties": {
+            "subject": {"type": "string"},
+            "body": {"type": "string"},
+        },
+        "required": ["subject", "body"]
+    },
+    on_invoke_tool=send_support_email_async
+)
+
 
 # Enhanced Knowledge Base search tool for customer support
 knowledge_base_tool = FunctionTool(
@@ -114,45 +168,18 @@ class CustomerSupportSystem:
             model=self.model,
             model_settings=ModelSettings(temperature=self.temperature),
         )
-
     def _create_escalation_agent(self):
         return Agent(
             name="EscalationAgent",
             instructions="""
                 You are the Escalation Specialist for customer support.
                 Your role is to handle complex issues that require additional research or human intervention.
-                
-                Your responsibilities:
-                - Handle queries that couldn't be resolved with the knowledge base
-                - Search for additional information online when internal docs are insufficient
-                - Provide general troubleshooting advice for uncommon issues
-                - Gather information for human support escalation
-                - Research industry-standard solutions for technical problems
-                
-                When to use web search:
-                - Customer reports an error not found in knowledge base
-                - Need to check for known issues or recent updates
-                - Looking for general troubleshooting approaches
-                - Verifying compatibility information
-                - Finding workarounds for known limitations
-                
-                Escalation criteria:
-                - Account-specific issues (billing, subscriptions, personal data)
-                - Product defects or warranty claims
-                - Complex technical issues requiring specialized expertise
-                - Requests for customization or special features
-                - Complaints requiring management attention
-                
-                Response format for escalations:
-                - Summarize the customer's issue clearly
-                - List troubleshooting steps already attempted
-                - Provide relevant information gathered
-                - Recommend next steps for human support team
-                - Set appropriate customer expectations
-                
-                Always maintain professionalism and ensure customers feel heard and supported.
+
+                When an escalation is required:
+                - Use the `send_support_email` tool to notify the human support team.
+                - Provide a clear summary of the issue, troubleshooting steps, and customer details in the email body.
             """,
-            tools=[self.web_search_tool],
+            tools=[self.web_search_tool, send_support_email_tool],  # 👈 added Gmail trigger
             model=self.model,
             model_settings=ModelSettings(temperature=self.temperature),
         )
@@ -163,9 +190,9 @@ class CustomerSupportSystem:
             instructions="""
                 You are the Customer Support Router Agent.
                 Your job is to analyze customer queries and route them to the appropriate specialist agent.
-                
+
                 Routing Guidelines:
-                
+
                 → Route to ProductKnowledgeAgent for:
                 - Product feature questions and explanations
                 - How-to questions and setup instructions
@@ -175,7 +202,7 @@ class CustomerSupportSystem:
                 - Product comparison questions
                 - General product usage questions
                 - Error messages or issues that might be documented
-                
+
                 → Route to EscalationAgent for:
                 - Complex technical issues not in documentation
                 - Unusual error messages or behaviors
@@ -183,24 +210,27 @@ class CustomerSupportSystem:
                 - Issues that might require web research
                 - Problems that seem to need human intervention
                 - Requests for features not currently available
-                
+                - Any situation where the support team should be notified by email
+                (the EscalationAgent has access to `send_support_email` tool)
+
                 Initial Response Protocol:
                 1. Greet the customer warmly and professionally
                 2. Acknowledge their query or concern
                 3. Quickly assess the type of support needed
                 4. Route to appropriate agent with context
-                
+
                 For ambiguous queries:
                 - Ask clarifying questions to understand the specific issue
                 - Gather relevant details (product version, error messages, steps taken)
                 - Then route based on the clarified information
-                
+
                 Always ensure customers feel welcomed and that their concerns are being taken seriously.
             """,
             handoffs=[self.knowledge_agent, self.escalation_agent],
             model=self.model,
             model_settings=ModelSettings(temperature=self.temperature),
         )
+
 
     async def handle_support_query(self, query: str, customer_name: str = "Customer"):
         """Handle customer support query with personalized greeting"""
