@@ -1,6 +1,5 @@
 streamlit
-agents
-openai-agents==0.2.11
+openai-agents
 python-dotenv
 qdrant-client
 agno
