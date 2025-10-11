@@ -6,14 +6,19 @@ from agents import Agent, Runner, SQLiteSession, ModelSettings
 from agents.tool import WebSearchTool
 from dotenv import load_dotenv
 from qdrant_client import QdrantClient
+from qdrant_client.http.models import PointStruct
 from agents.tool import Tool
 from agno.knowledge import Knowledge
 from agno.vectordb.qdrant import Qdrant
 from agno.knowledge.embedder.openai import OpenAIEmbedder
 from agno.knowledge.reader.pdf_reader import PDFReader
-from tools import qdrant_search_tool_on_invoke # Assuming 'tools.py' contains this function
+from tools import qdrant_search_tool_on_invoke, QDRANT_COLLECTION_NAME, QDRANT_URL, QDRANT_API_KEY, generate_embedding
 from agents.tool import FunctionTool, ToolContext 
 import datetime
+
+# RAG dependencies for file upload
+from typing import List
+from pypdf import PdfReader
 
 # Setup components
 load_dotenv()
@@ -21,13 +26,115 @@ api_key = os.getenv("OPENAI_API_KEY")
 from agno.tools import tool
 import re
 import yagmail
+
+# ------------------------------
+# File Upload RAG Functions
+# ------------------------------
+def split_text(text: str, chunk_size: int = 1000, overlap: int = 100) -> List[str]:
+    """Split text into overlapping chunks by characters"""
+    chunks = []
+    start = 0
+    text_length = len(text)
+    
+    while start < text_length:
+        end = start + chunk_size
+        chunk = text[start:end]
+        
+        if chunk.strip():
+            chunks.append(chunk.strip())
+        
+        start += chunk_size - overlap
+    
+    return chunks
+
+async def process_uploaded_file(file, qdrant_client, collection_name: str):
+    """Process uploaded PDF or text files and add to Qdrant using OpenAI embeddings"""
+    try:
+        chunks = []
+        
+        if file.type == "application/pdf":
+            reader = PdfReader(file)
+            # Process each page separately to maintain page context
+            for page_num, page in enumerate(reader.pages):
+                page_text = page.extract_text()
+                if page_text and page_text.strip():
+                    # Split page into smaller chunks if it's too large
+                    page_chunks = split_text(page_text)
+                    for chunk_idx, chunk in enumerate(page_chunks):
+                        chunks.append({
+                            "text": chunk,
+                            "page": page_num + 1,
+                            "chunk_idx": chunk_idx,
+                            "source": file.name
+                        })
+                    
+        elif file.type.startswith("text/"):
+            text = file.read().decode("utf-8")
+            text_chunks = split_text(text)
+            for chunk_idx, chunk in enumerate(text_chunks):
+                chunks.append({
+                    "text": chunk,
+                    "page": 1,  # Text files don't have pages
+                    "chunk_idx": chunk_idx,
+                    "source": file.name
+                })
+        else:
+            return 0, f"Unsupported file type: {file.type}"
+        
+        if not chunks:
+            return 0, "No text content found in file"
+        
+        # Generate embeddings and upload to Qdrant
+        points = []
+        
+        # Get current point count to generate unique IDs
+        try:
+            collection_info = qdrant_client.get_collection(collection_name)
+            start_id = collection_info.points_count
+        except:
+            start_id = 0
+        
+        # Process chunks and generate embeddings
+        for idx, chunk_data in enumerate(chunks):
+            # Generate embedding using OpenAI (same as tools.py)
+            embedding = await generate_embedding(chunk_data["text"])
+            
+            point = PointStruct(
+                id=start_id + idx,
+                vector=embedding,
+                payload={
+                    "content": chunk_data["text"],
+                    "metadata": {
+                        "page": chunk_data["page"],
+                        "source_file": chunk_data["source"],
+                        "chunk_index": chunk_data["chunk_idx"],
+                        "uploaded_at": datetime.datetime.now().isoformat()
+                    }
+                }
+            )
+            points.append(point)
+        
+        # Upload to Qdrant in batches
+        batch_size = 100
+        for i in range(0, len(points), batch_size):
+            batch = points[i:i + batch_size]
+            qdrant_client.upsert(
+                collection_name=collection_name,
+                wait=True,
+                points=batch
+            )
+        
+        return len(chunks), f"Successfully processed {file.name}"
+        
+    except Exception as e:
+        return 0, f"Error processing {file.name}: {str(e)}"
+
 def send_support_email(subject: str, body: str) -> str:
     """Send escalation emails to support team when customer issue requires human intervention."""
     try:
         sender_email = "kusumonika033@gmail.com"
-        sender_password = "nobd atmo sjcs vwyr"  # ⚠️ App Password (not personal password)
+        sender_password = "nobd atmo sjcs vwyr"
 
-        # Validate email format
         email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
         if not re.match(email_pattern, sender_email):
             return "Invalid email format."
@@ -40,10 +147,8 @@ def send_support_email(subject: str, body: str) -> str:
         return f"Error sending email: {e}"
 
 import json
-import asyncio
 
 async def send_support_email_async(tool_context, args):
-    # If args is a JSON string, parse it
     if isinstance(args, str):
         args = json.loads(args)
     return await asyncio.to_thread(
@@ -52,13 +157,12 @@ async def send_support_email_async(tool_context, args):
         body=args["body"]
     )
 
-# Escalation email tool for customer support
 send_support_email_tool = FunctionTool(
     name="SendSupportEmail",
     description=(
         "Sends an escalation email to the human support team when a customer issue requires manual intervention. "
         "Use this tool when the issue is complex, unusual, or outside the scope of the knowledge base. "
-        "The email should summarize the customer’s problem, list any troubleshooting already attempted, "
+        "The email should summarize the customer's problem, list any troubleshooting already attempted, "
         "and provide recommendations or next steps for the support team."
     ),
     params_json_schema={
@@ -72,8 +176,6 @@ send_support_email_tool = FunctionTool(
     on_invoke_tool=send_support_email_async
 )
 
-
-# Enhanced Knowledge Base search tool for customer support
 knowledge_base_tool = FunctionTool(
     name="ProductKnowledgeSearch",
     description="Searches the company's product knowledge base for information about products, features, troubleshooting, "
@@ -107,7 +209,7 @@ class CustomerSupportSystem:
     def __init__(
         self,
         model="gpt-4o",
-        temperature=0.1,  # Slightly higher for more natural responses
+        temperature=0.1,
         session_id=None,
         db_file="customer_support_conversations.db"
     ):
@@ -168,6 +270,7 @@ class CustomerSupportSystem:
             model=self.model,
             model_settings=ModelSettings(temperature=self.temperature),
         )
+    
     def _create_escalation_agent(self):
         return Agent(
             name="EscalationAgent",
@@ -179,7 +282,7 @@ class CustomerSupportSystem:
                 - Use the `send_support_email` tool to notify the human support team.
                 - Provide a clear summary of the issue, troubleshooting steps, and customer details in the email body.
             """,
-            tools=[self.web_search_tool, send_support_email_tool],  # 👈 added Gmail trigger
+            tools=[self.web_search_tool, send_support_email_tool],
             model=self.model,
             model_settings=ModelSettings(temperature=self.temperature),
         )
@@ -231,10 +334,8 @@ class CustomerSupportSystem:
             model_settings=ModelSettings(temperature=self.temperature),
         )
 
-
     async def handle_support_query(self, query: str, customer_name: str = "Customer"):
         """Handle customer support query with personalized greeting"""
-        # Add customer context to the query
         contextual_query = f"Customer {customer_name} asks: {query}"
         
         result = await Runner.run(self.support_router, contextual_query, session=self.session)
@@ -270,6 +371,28 @@ def main():
     
     if 'customer_name' not in st.session_state:
         st.session_state.customer_name = ""
+    
+    if 'uploaded_files_count' not in st.session_state:
+        st.session_state.uploaded_files_count = 0
+    
+    if 'qdrant_client' not in st.session_state:
+        # Initialize Qdrant client using your configuration
+        try:
+            if QDRANT_URL and QDRANT_API_KEY:
+                st.session_state.qdrant_client = QdrantClient(
+                    url=QDRANT_URL,
+                    api_key=QDRANT_API_KEY,
+                    timeout=30
+                )
+                # Test connection
+                collections = st.session_state.qdrant_client.get_collections()
+                st.sidebar.success(f"✅ Connected to Qdrant")
+            else:
+                st.session_state.qdrant_client = None
+                st.sidebar.error("⚠️ Qdrant credentials not found in .env")
+        except Exception as e:
+            st.session_state.qdrant_client = None
+            st.sidebar.error(f"⚠️ Could not connect to Qdrant: {str(e)}")
 
     # Sidebar
     with st.sidebar:
@@ -284,9 +407,63 @@ def main():
         )
         st.session_state.customer_name = customer_name
 
+        # File Upload Section
+        st.markdown("---")
+        st.subheader("📄 Upload Documents to Knowledge Base")
+        st.caption(f"Collection: `{QDRANT_COLLECTION_NAME}`")
+        
+        uploaded_files = st.file_uploader(
+            "Upload Support Documents",
+            type=["pdf", "txt"],
+            accept_multiple_files=True,
+            help="Upload product manuals, FAQs, or any support documentation. Files will be embedded using OpenAI and stored in Qdrant."
+        )
+        
+        if uploaded_files and st.session_state.qdrant_client:
+            if st.button("🚀 Process & Upload to Qdrant", type="primary"):
+                with st.spinner("Processing documents and generating embeddings..."):
+                    total_chunks = 0
+                    success_count = 0
+                    progress_bar = st.progress(0)
+                    
+                    for idx, file in enumerate(uploaded_files):
+                        st.write(f"📄 Processing: **{file.name}**")
+                        
+                        # Process file asynchronously
+                        chunks, message = asyncio.run(
+                            process_uploaded_file(
+                                file,
+                                st.session_state.qdrant_client,
+                                QDRANT_COLLECTION_NAME
+                            )
+                        )
+                        
+                        total_chunks += chunks
+                        if chunks > 0:
+                            success_count += 1
+                            st.success(f"✅ {message} ({chunks} chunks)")
+                        else:
+                            st.error(f"❌ {message}")
+                        
+                        # Update progress
+                        progress_bar.progress((idx + 1) / len(uploaded_files))
+                    
+                    if success_count > 0:
+                        st.session_state.uploaded_files_count += success_count
+                        st.balloons()
+                        st.success(f"🎉 Successfully uploaded {success_count} files with {total_chunks} total chunks to Qdrant!")
+                        st.info("💡 The knowledge base is now updated. Agents can search this content immediately!")
+        
+        elif uploaded_files and not st.session_state.qdrant_client:
+            st.error("⚠️ Qdrant client not initialized. Check your .env file for QDRANT_URL and QDRANT_API_KEY")
+        
+        if st.session_state.uploaded_files_count > 0:
+            st.info(f"📊 Files uploaded this session: **{st.session_state.uploaded_files_count}**")
+
         # Session Information
+        st.markdown("---")
         st.subheader("Session Info")
-        st.info(f"Session ID: {st.session_state.support_system.session_id}")
+        st.info(f"Session ID: `{st.session_state.support_system.session_id}`")
         
         # Clear conversation
         if st.button("🗑️ Clear Conversation"):
@@ -296,11 +473,15 @@ def main():
 
         # Support Statistics
         st.subheader("📊 Session Stats")
-        st.metric("Messages", len(st.session_state.messages))
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("Messages", len(st.session_state.messages))
+        with col2:
+            st.metric("Uploads", st.session_state.uploaded_files_count)
         
         # Quick Actions
         st.subheader("🚀 Quick Actions")
-        if st.button("Search Knowledge Base"):
+        if st.button("🔍 Search Knowledge Base"):
             st.session_state.show_kb_search = True
 
     # Main Interface
@@ -384,12 +565,9 @@ def main():
     st.markdown("🤖 Powered by AI | 📧 Need human support? Contact support@yourcompany.com")
 
 if __name__ == "__main__":
-    # Check if running in Streamlit
     try:
-        # This will work if we're in Streamlit
         main()
     except Exception as e:
-        # Fallback for command line testing
         print(f"Streamlit not running, falling back to command line mode. Error: {e}")
         system = CustomerSupportSystem()
         print("Customer Support System - Command Line Mode")
@@ -402,12 +580,10 @@ if __name__ == "__main__":
                     break
                 
                 if q.startswith("kb:"):
-                    # Direct knowledge base search
                     kb_query = q[3:].strip()
                     print("🔍 Searching knowledge base...")
                     resp = await system.search_knowledge_base(kb_query)
                 else:
-                    # Full support query
                     print("🤖 Processing support request...")
                     resp = await system.handle_support_query(q, "Test Customer")
                 
