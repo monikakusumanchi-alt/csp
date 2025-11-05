@@ -6,3 +6,5 @@ agno
 asyncio
 pypdf
 yagmail
+redis 
+redisvl
