@@ -114,6 +114,7 @@ class CustomerSupportSystem:
 # ---------------------------------------------------
 # Streamlit UI Application
 # ---------------------------------------------------
+# Streamlit UI Application
 def main():
     st.set_page_config(
         page_title="Customer Support Assistant",
@@ -122,119 +123,211 @@ def main():
         initial_sidebar_state="expanded"
     )
 
-    # Sidebar Settings
+    # ---- Sidebar Credentials ----
     st.sidebar.title("🎧 Support Settings")
     st.sidebar.subheader("🔑 API & Email Credentials")
+    # Example: set defaults for local/dev, remove/change for prod
+    # OpenAI API Key
+    DEV_DEFAULT_OPENAI_API_KEY = "sk-proj-..............."
 
-    openai_api_key = st.sidebar.text_input("OpenAI API Key", type="password")
-    sender_email = st.sidebar.text_input("Sender Email")
-    sender_password = st.sidebar.text_input("Email App Password", type="password")
+    # Email Configuration
+    DEV_DEFAULT_SENDER_EMAIL = "name@gmail.com"
+    DEV_DEFAULT_SENDER_PASSWORD = "password123"
 
-    # Store credentials
+    openai_api_key = st.sidebar.text_input("OpenAI API Key", type="password", value=DEV_DEFAULT_OPENAI_API_KEY)
+    sender_email = st.sidebar.text_input("Sender Email", value=DEV_DEFAULT_SENDER_EMAIL)
+    sender_password = st.sidebar.text_input("Email App Password", type="password", value=DEV_DEFAULT_SENDER_PASSWORD)
+
+    # openai_api_key = st.sidebar.text_input("OpenAI API Key", type="password")
+    # sender_email = st.sidebar.text_input("Sender Email")
+    # sender_password = st.sidebar.text_input("Email App Password", type="password")
+    st.session_state.openai_api_key = openai_api_key
+    st.session_state.sender_email = sender_email
+    st.session_state.sender_password = sender_password
     os.environ["OPENAI_API_KEY"] = openai_api_key
     os.environ["SENDER_EMAIL"] = sender_email
     os.environ["SENDER_PASSWORD"] = sender_password
-    st.session_state.openai_api_key = openai_api_key
 
-    # Customer Info
+    # ---- Customer Info ----
     st.sidebar.subheader("👤 Customer Information")
-    customer_name = st.sidebar.text_input("Customer Name", value=st.session_state.get('customer_name', ""))
+    customer_name = st.sidebar.text_input("Customer Name (Optional)", value=st.session_state.get('customer_name', ""))
     st.session_state.customer_name = customer_name
 
-    # Escalate Case
+    # ---- Escalate Case Section ----
     st.sidebar.markdown("---")
     st.sidebar.subheader("🚨 Escalate Support Case")
+    if "escalate_active" not in st.session_state:
+        st.session_state.escalate_active = False
+
     if st.sidebar.button("Escalate a Case"):
-        subject = st.sidebar.text_input("Subject", value="")
-        body = st.sidebar.text_area("Email Body", value="Describe the issue and previous steps.")
-        if st.sidebar.button("Send Escalation Email"):
+        st.session_state.escalate_active = True
+
+    if st.session_state.escalate_active:
+        subject = st.sidebar.text_input("Escalation Subject", value="")
+        body = st.sidebar.text_area(
+            "Escalation Email Body", 
+            value="Describe the issue and prior troubleshooting steps here."
+        )
+        escalate_clicked = st.sidebar.button("Send Escalation Email", key="send_escalation")
+        if escalate_clicked:
             result = send_support_email(
                 subject=subject,
                 body=body,
-                sender_email=sender_email,
-                sender_password=sender_password
+                sender_email=st.session_state.sender_email,
+                sender_password=st.session_state.sender_password
             )
-            st.sidebar.success(result)
+            st.sidebar.success(f"Escalation Result: {result}")
+            st.session_state.escalate_active = False
 
-    # Initialize Qdrant client
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("🧠 Knowledge Base Setup")
-
-    if 'qdrant_client' not in st.session_state:
-        try:
-            st.session_state.qdrant_client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
-            ensure_qdrant_collection()
-            st.sidebar.success(f"✅ Connected to Qdrant: `{QDRANT_COLLECTION_NAME}`")
-        except Exception as e:
-            st.sidebar.error(f"❌ Failed to connect Qdrant: {e}")
-            st.session_state.qdrant_client = None
-
-    # PDF Upload Section
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("📄 Upload Documents to Knowledge Base")
-    uploaded_files = st.sidebar.file_uploader(
-        "Upload Support PDFs",
-        type=["pdf"],
-        accept_multiple_files=True
-    )
-
-    if uploaded_files and st.session_state.qdrant_client:
-        if st.sidebar.button("🚀 Upload PDFs"):
-            with st.spinner("Processing and uploading PDFs to Qdrant..."):
-                for file in uploaded_files:
-                    file_path = f"/tmp/{file.name}"
-                    with open(file_path, "wb") as f:
-                        f.write(file.read())
-                    asyncio.run(upload_pdf_to_qdrant(file_path))
-                    st.success(f"✅ Uploaded {file.name}")
-                st.balloons()
-
-    # Initialize support system
+    # ---- Knowledge Base/Chat Setup ----
     if 'support_system' not in st.session_state:
         st.session_state.support_system = CustomerSupportSystem()
-
-    # Main Chat Interface
-    st.title("🎧 Customer Support Assistant")
-    st.markdown("Welcome to RUNO Support! Ask any question about our SIM-based CRM system.")
-
     if 'messages' not in st.session_state:
         st.session_state.messages = []
+    if 'uploaded_files_count' not in st.session_state:
+        st.session_state.uploaded_files_count = 0
+    if 'qdrant_client' not in st.session_state:
+        try:
+            if QDRANT_URL and QDRANT_API_KEY:
+                st.session_state.qdrant_client = QdrantClient(
+                    url=QDRANT_URL,
+                    api_key=QDRANT_API_KEY,
+                    timeout=30
+                )
+                st.sidebar.success(f"✅ Connected to Qdrant")
+            else:
+                st.session_state.qdrant_client = None
+                st.sidebar.error("⚠️ Qdrant credentials not found in .env")
+        except Exception as e:
+            st.session_state.qdrant_client = None
+            st.sidebar.error(f"⚠️ Could not connect to Qdrant: {str(e)}")
 
-    # Display chat history
-    for msg in st.session_state.messages:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
-            if "timestamp" in msg:
-                st.caption(f"⏰ {msg['timestamp']}")
+    # ---- File Upload Section ----
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("📄 Upload Documents to Knowledge Base")
+    st.sidebar.caption(f"Collection: `{QDRANT_COLLECTION_NAME}`")
+    uploaded_files = st.sidebar.file_uploader(
+        "Upload Support Documents",
+        type=["pdf", "txt"],
+        accept_multiple_files=True,
+        help="Upload product manuals, FAQs, or any support documentation."
+    )
 
-    # Chat Input
+    # File upload processing
+    if uploaded_files and st.session_state.qdrant_client:
+        if st.sidebar.button("🚀 Process & Upload to Qdrant", type="primary"):
+            with st.spinner("Processing documents and generating embeddings..."):
+                total_chunks = 0
+                success_count = 0
+                progress_bar = st.progress(0)
+
+                for idx, file in enumerate(uploaded_files):
+                    st.write(f"📄 Processing: **{file.name}**")
+                    chunks, message = asyncio.run(
+                        process_uploaded_file(
+                            file,
+                            st.session_state.qdrant_client,
+                            QDRANT_COLLECTION_NAME
+                        )
+                    )
+                    total_chunks += chunks
+                    if chunks > 0:
+                        success_count += 1
+                        st.success(f"✅ {message} ({chunks} chunks)")
+                    else:
+                        st.error(f"❌ {message}")
+                    progress_bar.progress((idx + 1) / len(uploaded_files))
+
+                if success_count > 0:
+                    st.session_state.uploaded_files_count += success_count
+                    st.balloons()
+                    st.success(f"🎉 Successfully uploaded {success_count} files with {total_chunks} total chunks to Qdrant!")
+                    st.info("💡 The knowledge base is now updated. Agents can search this content immediately!")
+
+    if uploaded_files and not st.session_state.qdrant_client:
+        st.error("⚠️ Qdrant client not initialized. Check your .env file for QDRANT_URL and QDRANT_API_KEY")
+
+    if st.session_state.uploaded_files_count > 0:
+        st.info(f"📊 Files uploaded this session: **{st.session_state.uploaded_files_count}**")
+
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Session Info")
+    st.sidebar.info(f"Session ID: `{st.session_state.support_system.session_id}`")
+
+    # ---- Main Chat UI ----
+    st.title("🎧 Customer Support Assistant")
+    st.markdown("Welcome to our AI-powered customer support! Ask me anything about our products.")
+
+    st.subheader("💬 Support Chat")
+    for message in st.session_state.messages:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+            if "timestamp" in message:
+                st.caption(f"⏰ {message['timestamp']}")
+
     prompt = st.chat_input("How can I help you today?")
     if prompt:
         timestamp = datetime.datetime.now().strftime("%H:%M:%S")
-        st.session_state.messages.append({"role": "user", "content": prompt, "timestamp": timestamp})
+        st.session_state.messages.append({
+            "role": "user", 
+            "content": prompt,
+            "timestamp": timestamp
+        })
         with st.chat_message("user"):
             st.markdown(prompt)
             st.caption(f"⏰ {timestamp}")
 
         with st.chat_message("assistant"):
-            with st.spinner("Processing..."):
+            with st.spinner("Processing your request..."):
                 try:
                     response = asyncio.run(
-                        st.session_state.support_system.handle_support_query(prompt, customer_name or "Customer")
+                        st.session_state.support_system.handle_support_query(
+                            prompt, customer_name or "Customer"
+                        )
                     )
                     st.markdown(response)
+                    response_timestamp = datetime.datetime.now().strftime("%H:%M:%S")
                     st.session_state.messages.append({
-                        "role": "assistant",
+                        "role": "assistant", 
                         "content": response,
+                        "timestamp": response_timestamp
+                    })
+                    st.caption(f"⏰ {response_timestamp}")
+                except Exception as e:
+                    error_msg = f"I apologize, but I encountered an error: {str(e)}. Please try again or contact human support."
+                    st.error(error_msg)
+                    st.session_state.messages.append({
+                        "role": "assistant", 
+                        "content": error_msg,
                         "timestamp": datetime.datetime.now().strftime("%H:%M:%S")
                     })
-                except Exception as e:
-                    error_msg = f"⚠️ Error: {str(e)}"
-                    st.error(error_msg)
 
     st.markdown("---")
-    st.caption("🤖 Powered by AI | 💬 Escalate via sidebar if needed.")
-
+    st.markdown("🤖 Powered by AI | 📧 Need human support? Use 'Escalate Case' above!")
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        print(f"Streamlit not running, falling back to command line mode. Error: {e}")
+        system = CustomerSupportSystem()
+        print("Customer Support System - Command Line Mode")
+        print("Type 'exit' to quit, 'kb:query' to search knowledge base directly")
+
+        async def interactive():
+            while True:
+                q = input("\n🎧 Customer: ").strip()
+                if q.lower() in ("exit", "quit"):
+                    break
+
+                if q.startswith("kb:"):
+                    kb_query = q[3:].strip()
+                    print("🔍 Searching knowledge base...")
+                    resp = await system.search_knowledge_base(kb_query)
+                else:
+                    print("🤖 Processing support request...")
+                    resp = await system.handle_support_query(q, "Test Customer")
+                
+                print(f"\n🎧 Support Agent: {resp}")
+
+        asyncio.run(interactive())
