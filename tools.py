@@ -51,7 +51,7 @@ def ensure_qdrant_collection(collection_name: str = QDRANT_COLLECTION_NAME, vect
     try:
         collections = qdrant_client.get_collections().collections
         existing_names = [c.name for c in collections]
-
+        print(existing_names)
         if collection_name not in existing_names:
             print(f"🆕 Creating new collection '{collection_name}'...")
             qdrant_client.recreate_collection(
@@ -77,36 +77,71 @@ def ensure_qdrant_collection(collection_name: str = QDRANT_COLLECTION_NAME, vect
         print(f"❌ Error ensuring Qdrant collection: {e}")
 
 
-# --- Upload PDF to Qdrant ---
-async def upload_pdf_to_qdrant(pdf_file_path: str):
-    """Reads a PDF, generates embeddings for each page, and uploads to Qdrant."""
-    ensure_qdrant_collection()  # ✅ Ensure collection before upload
+import io
+import os
+import uuid
+import asyncio
+from PyPDF2 import PdfReader
+from qdrant_client.models import PointStruct
+from pdf2image import convert_from_bytes
+import pytesseract
+import streamlit as st
 
-    reader = PdfReader(pdf_file_path)
+# --- Upload PDF to Qdrant ---
+async def upload_pdf_to_qdrant(uploaded_file, qdrant_client=None):
+    """Reads a PDF (including image-based ones), generates embeddings, and uploads to Qdrant."""
+    
+    # ✅ Use Qdrant client from session state if not passed
+    if qdrant_client is None:
+        qdrant_client = st.session_state.get("qdrant_client")
+
+    if not qdrant_client:
+        return 0, "❌ Qdrant client not initialized."
+
+    ensure_qdrant_collection(qdrant_client, QDRANT_COLLECTION_NAME)
+
+    # ✅ Wrap uploaded file in a BytesIO object
+    pdf_bytes = uploaded_file.read()
+    pdf_stream = io.BytesIO(pdf_bytes)
+    reader = PdfReader(pdf_stream)
     points = []
 
     for i, page in enumerate(reader.pages):
         page_text = page.extract_text()
+
+        # 🧠 OCR fallback if page has no text (image-based page)
         if not page_text or not page_text.strip():
-            print(f"⚠️ Page {i+1} has no text, skipped.")
+            print(f"⚠️ Page {i+1} has no text — using OCR fallback.")
+            try:
+                images = convert_from_bytes(pdf_bytes, first_page=i+1, last_page=i+1)
+                if images:
+                    ocr_text = pytesseract.image_to_string(images[0])
+                    page_text = ocr_text.strip()
+            except Exception as ocr_err:
+                print(f"❌ OCR failed on page {i+1}: {ocr_err}")
+                continue
+
+        if not page_text:
+            print(f"⚠️ Page {i+1} has no extractable text, skipped.")
             continue
 
         embedding = await generate_embedding(page_text)
         point_id = str(uuid.uuid4())
+
         points.append(
             PointStruct(
-                id=point_id,  # Let Qdrant auto-assign ID
+                id=point_id,
                 vector=embedding,
                 payload={
                     "content": page_text,
                     "metadata": {
                         "page": i + 1,
-                        "source_file": os.path.basename(pdf_file_path)
-                    }
-                }
+                        "source_file": uploaded_file.name
+                    },
+                },
             )
         )
-        print(f"✅ Embedded page {i + 1} ({len(page_text)} chars).")
+        print(f"✅ Embedded page {i+1} ({len(page_text)} chars).")
 
     if points:
         qdrant_client.upsert(
@@ -114,9 +149,13 @@ async def upload_pdf_to_qdrant(pdf_file_path: str):
             wait=True,
             points=points,
         )
-        print(f"📤 Uploaded {len(points)} pages from '{pdf_file_path}' to Qdrant.")
+        msg = f"📤 Uploaded {len(points)} pages from '{uploaded_file.name}' to Qdrant."
+        print(msg)
+        return len(points), msg
     else:
-        print("⚠️ No text found in PDF.")
+        msg = f"⚠️ No text found in '{uploaded_file.name}'."
+        print(msg)
+        return 0, msg
 
 
 # --- Process all PDFs in folder ---
@@ -127,7 +166,7 @@ async def process_pdfs_in_folder(folder_path: str):
         print("⚠️ No PDFs found in folder.")
         return
 
-    ensure_qdrant_collection()
+    ensure_qdrant_collection(qdrant_client, QDRANT_COLLECTION_NAME)
 
     for pdf_file in pdf_files:
         await upload_pdf_to_qdrant(os.path.join(folder_path, pdf_file))
@@ -136,7 +175,7 @@ async def process_pdfs_in_folder(folder_path: str):
 # --- Search Qdrant ---
 async def qdrant_search_tool_function(query: str, top_k: int = 3):
     """Search Qdrant for documents relevant to the query."""
-    ensure_qdrant_collection()  # ✅ Ensure before search
+    ensure_qdrant_collection(qdrant_client, QDRANT_COLLECTION_NAME)  # ✅ Ensure before search
 
     query_embedding = await generate_embedding(query)
     search_result = qdrant_client.search(

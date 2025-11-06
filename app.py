@@ -224,11 +224,8 @@ def main():
                 for idx, file in enumerate(uploaded_files):
                     st.write(f"📄 Processing: **{file.name}**")
                     chunks, message = asyncio.run(
-                        process_uploaded_file(
-                            file,
-                            st.session_state.qdrant_client,
-                            QDRANT_COLLECTION_NAME
-                        )
+                        upload_pdf_to_qdrant(file,
+                         st.session_state.qdrant_client)
                     )
                     total_chunks += chunks
                     if chunks > 0:
