@@ -20,6 +20,8 @@ from qdrant_client import QdrantClient
 
 # Load environment variables
 load_dotenv()
+import os
+os.environ["STREAMLIT_WATCH_FILE_CHANGES"] = "false"
 
 # ---------------------------------------------------
 # Email Utility
